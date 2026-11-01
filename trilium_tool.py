@@ -6,23 +6,56 @@ import cherry_tree
 from bs4 import BeautifulSoup as bsp
 import os
 
+from log_util import get_logger
 
-config = {
-    "base_url": "http://127.0.0.1:37840/etapi/",
-    "api_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-}
+# Shared logger for this module.
+log = get_logger("trilium_tool")
 
+
+#: Default ETAPI root URL, used when TRILIUM_BASE_URL is not set.
+DEFAULT_BASE_URL = "http://127.0.0.1:37840/etapi/"
+
+#: Default ETAPI token, used when TRILIUM_API_KEY is not set.
+DEFAULT_API_KEY = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+
+def load_config():
+    '''
+    Build the Trilium connection settings.
+
+    The values are taken from the environment variables below; the constants
+    above are used as a fallback when a variable is missing or empty.
+
+        TRILIUM_BASE_URL: ETAPI root URL. A trailing "/" is added when missing.
+        TRILIUM_API_KEY: ETAPI token.
+
+    Returns:
+        dict: A dict with the keys "base_url" and "api_key".
+    '''
+    base_url = os.environ.get("TRILIUM_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    if not base_url.endswith("/"):
+        base_url += "/"
+
+    api_key = os.environ.get("TRILIUM_API_KEY", "").strip() or DEFAULT_API_KEY
+
+    return {
+        "base_url": base_url,
+        "api_key": api_key,
+    }
+
+
+config = load_config()
 
 
 
 def create_note(title,content,pid="root",type="text"):
-    '''创建笔记  
-        title: 笔记标题  
-        content: 笔记内容。@fpath 可用于引用文件。
-        pid: 父笔记ID  
-        type: 笔记类型
+    '''Create a note.
+        title: note title
+        content: note content. @fpath can be used to reference a file.
+        pid: parent note ID
+        type: note type
 
-        returns: 创建成功返回笔记ID，失败返回None
+        returns: the note ID on success, None on failure
     '''
     jdata = {
         "title": title,
@@ -30,47 +63,47 @@ def create_note(title,content,pid="root",type="text"):
         "parentNoteId": pid,
         "type": type
     }
-   
-    #如果 content 以 @ 开头，则将其作为文件路径读取内容
+
+    # If content starts with @, treat the rest as a file path and read it.
     if content.startswith("@"):
         fpath = content[1:]
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 jdata["content"] = f.read()
         except Exception as e:
-            print("读取文件失败:",fpath,e)
+            log.error("failed to read file %s: %s", fpath, e)
             return None
-   
+
 
     rsp=requests.post(config["base_url"]+"create-note",
                       json=jdata,
                       headers={"Authorization": "Bearer "+config["api_key"]}
                       )
     if rsp.status_code!=201:
-        print("创建笔记失败:",rsp.status_code,rsp.text)
+        log.error("failed to create note (HTTP %s): %s", rsp.status_code, rsp.text)
         return None
     note_id=rsp.json()["note"]["noteId"]
-    print(f"创建笔记成功: note_id={note_id}")    
+    log.debug("note created: id=%s", note_id)
     return note_id
 
 def create_attachment(fpath,owner="root"):
-    '''创建附件  
-        fpath: 文件路径  
-        owner: 附件所有者ID  
+    '''Create an attachment.
+        fpath: file path
+        owner: owner ID of the attachment
     '''
     #try read file
     try:
         with open(fpath,"rb") as f:
             f_data=f.read()
     except Exception as e:
-        print("读取附件文件失败:",fpath,e)
+        log.error("failed to read attachment file %s: %s", fpath, e)
         return None
-    
+
     # get file mime
     import mimetypes
     mime_type, _ = mimetypes.guess_type(fpath)
-    
-    # 先创建一个附件记录
+
+    # Create the attachment record first.
     j_data_1={
         "ownerId": owner,
         "role":"image",
@@ -79,176 +112,185 @@ def create_attachment(fpath,owner="root"):
     }
     rsp=requests.post(config["base_url"]+"attachments",json=j_data_1,headers={"Authorization": "Bearer "+config["api_key"]})
     if rsp.status_code!=201:
-        print("创建占位附件失败:",rsp.status_code,rsp.text)
+        log.error("failed to create attachment placeholder (HTTP %s): %s", rsp.status_code, rsp.text)
         return None
-    print("创建占位附件成功:",rsp.json())
+    log.debug("attachment placeholder created: %s", rsp.json())
 
-    # 写入附件内容
+    # Write the attachment content.
     attachment_id=rsp.json()["attachmentId"]
-    
+
     rsp2=requests.put(config["base_url"]+f"attachments/{attachment_id}/content",
                      data=f_data,
                      headers={"Authorization": "Bearer "+config["api_key"],
                               "Content-Type": "application/octet-stream"}
                      )
     if rsp2.status_code!=204:
-        print("写入附件内容失败:",rsp2.status_code,rsp2.text)
+        log.error("failed to write attachment content (HTTP %s): %s", rsp2.status_code, rsp2.text)
         return None
-    print("写入附件内容成功:",attachment_id)
-    
+    log.debug("attachment content written: %s", attachment_id)
+
     return attachment_id
 
 
 def update_note(note_id, content=None):
-    '''更新笔记  
-        note_id: 笔记ID  
-        content: 笔记内容。@fpath 可用于引用文件。
+    '''Update a note.
+        note_id: note ID
+        content: note content. @fpath can be used to reference a file.
     '''
 
-    # 如果 content 以 @ 开头，则将其作为文件路径读取内容
+    # If content starts with @, treat the rest as a file path and read it.
     if content.startswith("@"):
         fpath = content[1:]
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
-            print("读取文件失败:", fpath, e)
+            log.error("failed to read file %s: %s", fpath, e)
             return None
-    
+
     rsp=requests.put(config["base_url"]+f"notes/{note_id}/content",
                      data=content,
                      headers={"Authorization": "Bearer "+config["api_key"],
                               "Content-Type": "text/plain"}
                         )
     if rsp.status_code!=204:
-        print("更新笔记失败:",rsp.status_code,rsp.text)
+        log.error("failed to update note (HTTP %s): %s", rsp.status_code, rsp.text)
         return None
-    print("更新笔记成功:",note_id)
+    log.debug("note updated: %s", note_id)
     return note_id
 
 
 
 
 def import_html(fin:str,pid:str="root",title:str=None):
-    '''导入HTML文件为 Trillium 笔记  
-        fin: 单个 HTML文件路径。
-        pid: 父笔记ID  
-        title: 笔记标题，如果为None，则使用HTML文件名作为标题
-        returns: 创建成功返回 [note_id,img_count,img_uploaded_count]，失败返回None
+    '''Import an HTML file as a Trilium note.
+        fin: a single HTML file path.
+        pid: parent note ID
+        title: note title; when None, the HTML file name is used as title
+        returns: [note_id,img_count,img_uploaded_count] on success, None on failure
     '''
     if not fin:
-        print(f"--err-[import_html] fin is None, pid={pid}")
+        log.error("[import_html] fin is None, pid=%s", pid)
         return None,0,0
-    
+
     if not pid:
-        print(f"--err-[import_html] pid is None")
+        log.error("[import_html] pid is None")
         return None,0,0
-    
+
     if title is None:
         title=os.path.splitext(os.path.basename(fin))[0]
-    
-    # 确保有一个临时目录，用来存放清理后的HTML文件
+
+    # Make sure a temporary directory exists to hold the cleaned HTML files.
     temp_dir = os.path.join(os.path.dirname(fin), "temp")
     os.makedirs(temp_dir, exist_ok=True)
 
 
-    # 获得干净的的 HTML 内容，并将其写入临时文件
+    # Get the cleaned HTML content and write it to a temporary file.
     cleaned_html = cherry_tool.clean_html(fin, os.path.join(temp_dir, "step1_"+os.path.basename(fin)))
-    html_content=cleaned_html    # 使用清理后的 HTML 内容
-    
-    # 先创建一个空笔记进行占位
+    html_content=cleaned_html    # Use the cleaned HTML content.
+
+    # Create an empty note first as a placeholder.
     note_id = create_note(title, "to be updated", pid=pid)
     if not note_id:
         return None,0,0
-    
-    # 遍历HTML内容中的 <img> 标签，上传图片为附件，获得附件 ID，並替换 img.src 为附件 URL
+
+    # Walk the <img> tags of the HTML content, upload each image as an
+    # attachment, get its attachment ID and replace img.src with the
+    # attachment URL.
     soup = bsp(html_content, "html.parser")
 
-    img_count = 0             #HTML中图片的数量
-    img_uploaded_count = 0    #上传附件成功的数量
+    img_count = 0             #Number of images in the HTML.
+    img_uploaded_count = 0    #Number of successfully uploaded attachments.
     for img in soup.find_all("img"):
         img_src = img.get("src")
         img_count += 1
         if not img_src:
             continue
 
-        # 如果 src 是相对路径，则转换为相对于 HTML 文件的绝对路径
+        # If src is a relative path, resolve it against the HTML file.
         img_path = os.path.join(os.path.dirname(fin), img_src)
-        print(f"[i_html]正在上传图片[{img_count}]: {img_path}")
+        log.debug("[i_html] uploading image [%d/%d]: %s", img_count, img_count, img_path)
         if not os.path.exists(img_path):
-            print(f"[i_html]图片文件不存在: {img_path}")
+            log.warning("[i_html] image file not found: %s", img_path)
             continue
-        # 上传图片为附件
+        # Upload the image as an attachment.
         attachment_id = create_attachment(img_path, owner=note_id)
         if not attachment_id:
-            print(f"[i_html]上传图片失败: {img_path}")
+            log.warning("[i_html] failed to upload image: %s", img_path)
             continue
-        # 替换 <img> 标签的 src 为附件 URL
+        # Replace the src of the <img> tag with the attachment URL.
         img["src"] = f"api/attachments/{attachment_id}/image/image.png"
         img_uploaded_count += 1
 
-    # 将修改后的 HTML 内容作为笔记内容更新
+    # Update the note with the modified HTML content.
     html_content2 = str(soup)
 
-    # 将修改后的 HTML 保存到一个临时文件中，以便调试
+    # Save the modified HTML to a temporary file for debugging.
     temp_html_path = os.path.join(temp_dir, f"step2_{os.path.basename(fin)}")
     with open(temp_html_path, "w", encoding="utf-8") as f:
         f.write(html_content2)
 
-    update_note(note_id, html_content2)    
-    print(f"[i_html]导入HTML完成: note_id={note_id}, 图片总数={img_count}, 成功上传图片数={img_uploaded_count}")
-    
+    update_note(note_id, html_content2)
+    log.info("[i_html] HTML imported: note_id=%s, images=%d, uploaded=%d",
+             note_id, img_count, img_uploaded_count)
+
     return note_id, img_count, img_uploaded_count
 
 
 def walk_tree(nodes: list, depth: int = 0, stat=None):
     """
-    深度优先前序遍历节点树，保证父节点先于子节点被访问。
-    注意：当调用此函数时，第一层 node 必须已经拿到 pid（父笔记 ID）属性。
+    Traverse the node tree depth-first in pre-order so that every parent is
+    visited before its children.
+    Note: when this function is called, the first level of nodes must already
+    have the pid (parent note ID) attribute.
 
     Args:
-        nodes (list): build_tree() 返回的顶层节点列表
-        depth (int): 当前层级，用于打印缩进，外部调用保持默认 0
-        stat: (dict): 统计信息。  
-            stat['finished'] - int  己处理完成的节点数
+        nodes (list): the top level node list returned by build_tree()
+        depth (int): the current level, used for indentation; keep the default
+            0 when calling from outside
+        stat: (dict): statistics.
+            stat['finished'] - int  number of processed nodes
     """
     stat={'finished':0} if not stat else stat
 
     for node in nodes:
-        # 先处理当前节点（从上到下的“上”）
-        print(f"{"{0:5d}".format(stat["finished"])}  {'****' * depth}{node['title']} (id={node.get('cherry_id')})")
+        # Process the current node first (the "top" of the top-down traversal).
+        log.info("%5d  %s%s (id=%s)", stat["finished"],
+                 '****' * depth, node['title'], node.get('cherry_id'))
 
         if node['fpath']:
-            # 创建新笔记
+            # Create a new note.
             try:
                 new_note_id,_,_=import_html(node['fpath'],node['pid'],node['title'])
             except Exception as e:
-                print(e)
-                with open("import_progress.json",'wb',encoding="utf-8") as f:
+                log.error("%s", e)
+                with open("import_progress.json",'w',encoding="utf-8") as f:
                     json.dump(nodes,indent=4)
-                
+
         else:
-            # 如果 fpath 为空，说明这是顶层虚拟节点，直接忽略这层，把 pid 透传到下层去
+            # If fpath is empty this is a top level virtual node: skip this
+            # level and pass the parent ID down to the children.
             new_note_id=node['pid']
-        node['done']=1   #表示此节点己处理完了
-        stat['finished']+=1   
-        
+        node['done']=1   #Mark this node as processed.
+        stat['finished']+=1
+
         for node_2 in node['childs']:
             node_2['pid']=new_note_id
-        
-        # 再递归处理子节点（从上到下的“下”）
+
+        # Then recurse into the children (the "bottom" of the top-down traversal).
         walk_tree(node.get("childs", []), depth + 1,stat=stat)
 
 
 def import_html_from_dir(root_dir:str,pid:str="root",glob="*.html"):
-    '''导入目录下的所有 HTML 文件为 Trillium 笔记。
-        具体规划：
-        1. 调用 cherry_tree.build_tree() 将目录下的 HTML 文件组织成 JSON 格式的节点树（每个节点代表一个笔记）。
-        2. 以此节点树为参考，在 Trillium 中创建笔记（树）
+    '''Import all HTML files of a directory as Trilium notes.
+        Plan:
+        1. Call cherry_tree.build_tree() to organize the HTML files of the
+           directory into a JSON node tree (each node represents one note).
+        2. Use that node tree as a reference to create the notes (tree) in Trilium.
         Args:
-            root_dir: HTML文件所在目录  
-            pid: 父笔记ID  
-            glob: 文件匹配模式，默认 "*.html"
+            root_dir: the directory containing the HTML files
+            pid: parent note ID
+            glob: file matching pattern, defaults to "*.html"
     '''
 
     nodes:list =cherry_tree.build_tree(root_dir)
@@ -259,44 +301,44 @@ def import_html_from_dir(root_dir:str,pid:str="root",glob="*.html"):
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Trillium Tool")
-    
+    parser = argparse.ArgumentParser(description="Trilium Tool")
+
     #subcommand: create_note
-    subparsers = parser.add_subparsers(dest="command", help="Subcommands: c_note，c_atm")
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands: c_note, c_atm, u_note, i_html, i_dir")
     subparsers.required = True
 
     # Arguments for create_note subcommand
-    create_note_parser = subparsers.add_parser("c_note", help="Create a note in Trillium")
+    create_note_parser = subparsers.add_parser("c_note", help="Create a note in Trilium")
     create_note_parser.add_argument("title", type=str, help="Title of the note")
     create_note_parser.add_argument("content", type=str, help="note content. Use @filepath to reference a file.")
     create_note_parser.add_argument("--pid", type=str, default="root", help="Parent ID of the note (default: root)")
     create_note_parser.add_argument("--type", type=str, default="text", help="Type of the note (default: text)")
 
     # Arguments for create_attachment subcommand
-    create_attachment_parser = subparsers.add_parser("c_atm", help="Create an attachment in Trillium")
+    create_attachment_parser = subparsers.add_parser("c_atm", help="Create an attachment in Trilium")
     create_attachment_parser.add_argument("fpath", type=str, help="File path of the attachment")
-    create_attachment_parser.add_argument("--owner", type=str, default="root", help="Owner ID of the attachment (default: root)")           
+    create_attachment_parser.add_argument("--owner", type=str, default="root", help="Owner ID of the attachment (default: root)")
 
     # Arguments for update_note subcommand
-    update_note_parser = subparsers.add_parser("u_note", help="Update a note in Trillium")
+    update_note_parser = subparsers.add_parser("u_note", help="Update a note in Trilium")
     update_note_parser.add_argument("note_id", type=str, help="ID of the note to update")
-    update_note_parser.add_argument("content", type=str, help="New content for the note. Use @filepath to reference a file.")   
-      
+    update_note_parser.add_argument("content", type=str, help="New content for the note. Use @filepath to reference a file.")
+
     # Arguments for import_html subcommand
-    import_html_parser = subparsers.add_parser("i_html", help="Import an HTML file as a Trillium note")
+    import_html_parser = subparsers.add_parser("i_html", help="Import an HTML file as a Trilium note")
     import_html_parser.add_argument("fin", type=str, help="Input HTML file path")
     import_html_parser.add_argument("--pid", type=str, default="root", help="Parent ID of the note (default: root)")
     import_html_parser.add_argument("--title", type=str, default=None, help="Title of the note (default: use HTML file name)")
 
-   # Arguments for import_html_dir subcommand
-    import_html_dir_parser = subparsers.add_parser("i_dir", help="Import an HTML dir into Trillium note")
+    # Arguments for import_html_dir subcommand
+    import_html_dir_parser = subparsers.add_parser("i_dir", help="Import an HTML dir into Trilium note")
     import_html_dir_parser.add_argument("fin", type=str, help="Input HTML dir")
     import_html_dir_parser.add_argument("--pid", type=str, default="root", help="Parent ID of the note (default: root)")
-    
+
 
     args = parser.parse_args()
 
-    if args.command == "create_note":
+    if args.command == "c_note":
         create_note(args.title, args.content, args.pid, args.type)
     elif args.command == "c_atm":
         create_attachment(args.fpath, args.owner)
@@ -308,7 +350,3 @@ if __name__ == "__main__":
         import_html_from_dir(args.fin,args.pid)
     else:
         parser.print_help()
-    
-    
-
-

@@ -4,36 +4,43 @@ import os
 import re
 from pathlib import Path
 
-# 匹配文件名中 ID 的正则表达式
+from log_util import get_logger
+
+# Shared logger for this module.
+log = get_logger("cherry_tree")
+
+# Regular expression matching the note ID in a file name.
 ID_PATTERN = re.compile(r'^(?P<title>.+?)_(?P<id>\d+)$')
 
 
 def build_tree(root_dir: str, pattern: str = "*.html", separator: str = "--") -> list:
     """
-    用 glob 模式筛选 root_dir 中（不递归）的文件，按文件名中的 separator 构建节点 JSON 树。
-    无分隔符的文件忽略。
+    Select the files of root_dir (non-recursive) with a glob pattern and build
+    a node JSON tree from the separator used in the file names.
+    Files without the separator are ignored.
 
     Args:
-        root_dir (str): 要扫描的目录
-        pattern (str): 文件名匹配模式，默认 "*.html"
-        separator (str): 文件名中的层级分隔符，默认 "--"
-    
+        root_dir (str): The directory to scan.
+        pattern (str): The file name pattern, defaults to "*.html".
+        separator (str): The hierarchy separator in file names, defaults to "--".
+
     Returns:
-        节点树的列表，每个节点代表一个笔记，包含以下键：
-            - cherry_id: 表示该 HTML 文件对应的 CherryTree 笔记 ID
-            - title: 节点标题
-            - fpath: HTML 文件的路径
-            - childs: 子节点列表
+        A list of node trees. Each node represents one note and contains:
+            - cherry_id: the CherryTree note ID of the corresponding HTML file
+            - title: the node title
+            - fpath: the path of the HTML file
+            - childs: the list of child nodes
 
     """
     root = Path(root_dir).resolve()
     if not root.is_dir():
-        raise NotADirectoryError(f"不是有效目录: {root}")
+        raise NotADirectoryError(f"not a valid directory: {root}")
 
     node_map = {}
     roots = []
 
-    # glob(pattern) 只匹配当前层，不递归；is_file() 过滤掉匹配到的子目录
+    # glob(pattern) only matches the current level (non-recursive);
+    # is_file() filters out matched sub-directories.
     for file_path in sorted(root.glob(pattern)):
         if not file_path.is_file():
             continue
@@ -41,7 +48,7 @@ def build_tree(root_dir: str, pattern: str = "*.html", separator: str = "--") ->
         stem, ext = os.path.splitext(file_path.name)
         parts = [p.strip() for p in stem.split(separator) if p.strip()]
 
-        # 无分隔符的文件忽略
+        # Ignore files without the separator.
         if len(parts) < 2:
             continue
 
@@ -79,14 +86,14 @@ def build_tree(root_dir: str, pattern: str = "*.html", separator: str = "--") ->
                     node["fpath"] = str(file_path.as_posix())
 
             parent_children = node["childs"]
-    print("note tree ok")
+    log.debug("note tree ready: %d root node(s)", len(roots))
 
     return roots
 
 
 
 def sort_tree(nodes: list, key: str = "title") -> list:
-    """递归排序节点。key 可选 title / id / fpath。"""
+    """Recursively sort the nodes. key can be title / id / fpath."""
     def sort_key(n):
         v = n.get(key)
         if v is None:
@@ -103,32 +110,34 @@ def sort_tree(nodes: list, key: str = "title") -> list:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="按文件名中的分隔符，将目录当前层匹配 glob 的文件整理为层级 JSON（不递归子目录）。",
+        description="Build a hierarchical JSON from the files of the current directory "
+                    "level that match the glob pattern, based on the separator in the file names "
+                    "(sub-directories are not scanned).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
-  python build_tree.py
-  python build_tree.py ./notes
-  python build_tree.py ./notes -g "*.md" -s "__" -o out.json
-  python build_tree.py ./notes --sort id
+Examples:
+  python cherry_tree.py
+  python cherry_tree.py ./notes
+  python cherry_tree.py ./notes -g "*.md" -s "__" -o out.json
+  python cherry_tree.py ./notes --sort id
         """,
     )
 
     parser.add_argument("directory", nargs="?", default=".",
-                        help="要扫描的目录（默认: 当前目录）")
+                        help="Directory to scan (default: current directory)")
     parser.add_argument("-g", "--glob", default="*.html", dest="glob_pattern",
-                        help="文件名匹配模式（默认: *.html）")
+                        help="File name pattern (default: *.html)")
     parser.add_argument("-s", "--separator", default="--",
-                        help="文件名中的层级分隔符（默认: --）")
+                        help="Hierarchy separator in file names (default: --)")
     parser.add_argument("-o", "--output", default="tree.json",
-                        help="输出 JSON 文件路径（默认: tree.json）")
+                        help="Output JSON file path (default: tree.json)")
     parser.add_argument("--sort", choices=["title", "id", "fpath", "none"],
                         default="title",
-                        help="子节点排序依据（默认: title；none 表示不排序）")
+                        help="Child sort key (default: title; none means no sorting)")
     parser.add_argument("--indent", type=int, default=2,
-                        help="JSON 缩进空格数（默认: 2；设为 0 则紧凑输出）")
+                        help="JSON indentation (default: 2; 0 for compact output)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="只打印统计信息，不写文件")
+                        help="Only print statistics, do not write the file")
     parser.add_argument("--version", action="version", version="%(prog)s 1.2")
 
     args = parser.parse_args()
@@ -154,17 +163,18 @@ def main():
     total, leaves = count_nodes(tree)
 
     if args.dry_run:
-        print(f"[dry-run] 根节点: {len(tree)}，总节点: {total}，叶子节点: {leaves}")
-        print(f"[dry-run] 未写入 {args.output}")
+        log.info("[dry-run] root nodes: %d, total nodes: %d, leaf nodes: %d",
+                 len(tree), total, leaves)
+        log.info("[dry-run] %s was not written", args.output)
         return
 
     indent = args.indent if args.indent > 0 else None
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(tree, f, ensure_ascii=False, indent=indent)
 
-    print(f"已写入 {args.output}：根节点 {len(tree)}，总节点 {total}，叶子节点 {leaves}")
+    log.info("wrote %s: root nodes: %d, total nodes: %d, leaf nodes: %d",
+             args.output, len(tree), total, leaves)
 
 
 if __name__ == "__main__":
     main()
-

@@ -4,3 +4,4 @@ out/
 *.ctb
 *.db
 *.html
+*.env
